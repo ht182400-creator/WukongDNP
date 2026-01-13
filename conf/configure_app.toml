@@ -39,3 +39,5 @@ dump_model_freq = 100
 # The Learner pushes model updates, and the frequency at which Actors fetch the model (in minutes).
 # Learner推送模型参数文件至模型池，以及Actor从模型池获取模型参数文件的频次（单位：分钟）
 model_file_sync_per_minutes = 1
+eval_model_dir = "/data/projects/back_to_the_realm_v2/ckpt"
+eval_model_id = "149885"

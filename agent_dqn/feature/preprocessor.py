@@ -50,6 +50,13 @@ class Preprocessor:
         self.last_treasure_count = 0
         self.last_buff_count = 0
         self.ray_dist = [0] * 8
+        
+        # Collision detection variables
+        # 碰撞检测变量
+        self.last_pos = (-1, -1)
+        self.collision_detected = False
+        self.last_end_dist = None  # 用于计算距离终点的改进
+        self.end_dist_improvement = 0  # 距离改进值
 
     def update_map(self, map_data, view, pos):
         view_size = view.shape[0]
@@ -96,7 +103,16 @@ class Preprocessor:
         self.step_no = obs["frame_state"]["step_no"]
         self.step_no_norm = norm(self.step_no, 2000)
 
+        # Collision detection: check if position changed significantly
+        # 碰撞检测：检查位置是否显著改变（移动距离小于500视为撞墙）
         self.cur_pos = (hero["pos"]["x"], hero["pos"]["z"])
+        if self.last_pos != (-1, -1):
+            dist = ((self.last_pos[0] - self.cur_pos[0]) ** 2 + 
+                   (self.last_pos[1] - self.cur_pos[1]) ** 2) ** 0.5
+            self.collision_detected = dist <= 500
+        else:
+            self.collision_detected = False
+        self.last_pos = self.cur_pos
 
         # End point information
         # 终点信息
@@ -108,6 +124,19 @@ class Preprocessor:
                 self.end_pos = (organ["pos"]["x"], organ["pos"]["z"])
 
         self.feature_end_pos = self._get_pos_feature(is_end_pos_found, self.cur_pos, self.end_pos)
+        
+        # Calculate distance to end point for distance reward
+        # 计算到终点的距离，用于距离奖励
+        if is_end_pos_found:
+            cur_end_dist = self.feature_end_pos[-1]  # normalized distance
+            if self.last_end_dist is not None:
+                self.end_dist_improvement = self.last_end_dist - cur_end_dist  # 距离减少为正
+            else:
+                self.end_dist_improvement = 0
+            self.last_end_dist = cur_end_dist
+        else:
+            self.end_dist_improvement = 0
+            self.last_end_dist = None
 
         # Agent information
         # 智能体信息
@@ -269,29 +298,48 @@ class Preprocessor:
         return legal_action
 
     def reward_process(self):
-        # Reward weight
-        # 奖励权重
-        step_weight = 10
+        # Reward weight - optimized for treasure collection within 2000 steps
+        # 奖励权重 - 针对在2000步内尽可能多收集宝箱并到达终点进行优化
+        # 策略调整：优先收集宝箱（至少4-5个），在2000步内到达终点即可，不需要尽量少步数
+        step_weight = 10  # 探索新区域的奖励
         buff_weight = 0
-        treasure_weight = 0
-        end_weight = 0.1
+        treasure_weight = 70  # 大幅提高宝箱奖励权重（从45到70），优先收集宝箱
+        end_weight = 3.5  # 保持终点奖励权重，确保能到达终点，但不需要快速到达
+        collision_weight = -8  # 碰撞惩罚权重，减少碰撞
+        step_penalty_weight = -0.005  # 大幅降低步数惩罚（从-0.025到-0.005），因为不需要尽量少步数
+        distance_reward_weight = 1.5  # 距离奖励权重，保持适中，引导向终点移动
 
         step_no_norm = min(self.step_no_norm + 0.2, 1)
 
-        # Step reward
-        # 每步奖励
+        # Step reward: exploration reward
+        # 每步奖励：探索新区域的奖励
         step_reward = step_weight * (self.visited_norm - self.last_visited_norm)
 
         # Buff reward
         # Buff奖励
         buff_reward = buff_weight * self.buff_get
 
-        # Treasure reward
-        # 宝藏奖励
-        treasure_reward = treasure_weight * self.treasure_get * (1 - step_no_norm)
+        # Treasure reward: strongly encourage treasure collection
+        # 宝藏奖励：强烈鼓励收集宝箱，优先收集宝箱（至少4-5个）
+        # 早期收集奖励更大，但整个过程中都给予较高奖励
+        treasure_reward = treasure_weight * self.treasure_get * (1 - step_no_norm * 0.3)
 
-        # End reward
-        # 终点奖励
-        end_reward = end_weight * (1 - self.feature_end_pos[-1]) * step_no_norm
+        # End reward: reward for getting closer to end point
+        # 终点奖励：接近终点时给予奖励，确保能在2000步内到达终点
+        # 不需要快速到达，只要在2000步内到达即可
+        end_dist = self.feature_end_pos[-1] if len(self.feature_end_pos) > 0 else 1.0
+        end_reward = end_weight * (1 - end_dist) * (0.3 + 0.7 * step_no_norm)  # 步数越多时奖励越大，鼓励在2000步内到达
 
-        return [step_reward, treasure_reward, end_reward, buff_reward]
+        # Distance improvement reward: reward for getting closer to end point
+        # 距离改进奖励：接近终点时给予奖励，提供即时反馈
+        distance_reward = distance_reward_weight * self.end_dist_improvement
+
+        # Collision penalty: penalize collisions to reduce wall hits
+        # 碰撞惩罚：惩罚碰撞以减少撞墙
+        collision_penalty = collision_weight if self.collision_detected else 0
+
+        # Step penalty: minimal penalty per step
+        # 步数惩罚：每步只有很小的负奖励，因为不需要尽量少步数，只要在2000步内到达即可
+        step_penalty = step_penalty_weight
+
+        return [step_reward, treasure_reward, end_reward, buff_reward, distance_reward, collision_penalty, step_penalty]

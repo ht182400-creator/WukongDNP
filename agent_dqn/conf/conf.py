@@ -47,13 +47,19 @@ class Config:
 
     # Discount factor GAMMA in RL
     # RL中的回报折扣GAMMA
-    GAMMA = 0.9
+    # 提高GAMMA以更重视长期奖励，因为任务较长(2000步)且奖励更丰富
+    # Increased GAMMA to value long-term rewards more, as the task is long (2000 steps) and rewards are richer
+    GAMMA = 0.95  # 从0.9提高到0.95，更重视长期奖励
 
     # epsilon
-    EPSILON_MIN = 0.1
-    EPSILON_MAX = 1.0
-    EPSILON_DECAY = 1e-6
+    # 探索参数：epsilon-greedy策略
+    EPSILON_MIN = 0.1  # 最小探索率，保持一定探索
+    EPSILON_MAX = 1.0  # 初始探索率，完全随机探索
+    # epsilon衰减率：随着预测次数增加，探索率逐渐降低
+    # 考虑到奖励机制优化后需要更多探索来学习收集宝箱和优化路径
+    EPSILON_DECAY = 2e-6  # 从1e-6提高到2e-6，稍微加快探索收敛速度
 
     # Initial learning rate
     # 初始的学习率
-    START_LR = 1e-4
+    # 根据训练日志分析：训练不稳定（Q值从正变负，价值损失大幅上升），降低学习率以提高稳定性
+    START_LR = 5e-5  # 从1e-4降低到5e-5，提高训练稳定性，减少价值损失波动

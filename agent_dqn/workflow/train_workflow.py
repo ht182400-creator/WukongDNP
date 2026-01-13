@@ -33,8 +33,18 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
             logger.error(f"usr_conf is None, please check agent_dqn/conf/train_env_conf.toml")
             return
 
+        # Get max_step from configuration file
+        # 从配置文件读取最大步数
+        map_name = usr_conf.get("env_conf", {}).get("map_name", "map_cherry")
+        max_step = usr_conf.get("env_conf", {}).get(map_name, {}).get("max_step", 2000)
+        logger.info(f"Loaded max_step from config: {max_step}")
+        
+        # Set max_step to preprocessor
+        # 设置最大步数到preprocessor
+        agent.feature_manager.max_step = max_step
+
         while True:
-            for g_data in run_episodes(episode_num_every_epoch, env, agent, usr_conf, logger, monitor):
+            for g_data in run_episodes(episode_num_every_epoch, env, agent, usr_conf, logger, monitor, max_step):
                 agent.learn(g_data)
                 g_data.clear()
 
@@ -49,7 +59,7 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
         raise RuntimeError(f"workflow error")
 
 
-def run_episodes(n_episode, env, agent, usr_conf, logger, monitor):
+def run_episodes(n_episode, env, agent, usr_conf, logger, monitor, max_step=2000):
     try:
         last_put_monitor_time = 0
         for episode in range(n_episode):
@@ -122,15 +132,44 @@ def run_episodes(n_episode, env, agent, usr_conf, logger, monitor):
                 # Determine task over, and update the number of victories
                 # 判断任务结束, 并更新胜利次数
                 game_info = _extra_info["game_info"]
+                treasure_score = game_info.get('treasure_score', 0)  # 宝箱分数（每个宝箱100分）
+                treasure_count = treasure_score // 100  # 转换为宝箱数量（每个宝箱100分）
+                
                 if truncated:
-                    reward = -10
+                    # 超时惩罚：根据收集的宝箱数量给予部分奖励，但仍有惩罚
+                    # 超时意味着没有完成任务，给予较大惩罚，但收集的宝箱仍有一定价值
+                    treasure_bonus = treasure_count * 12  # 每个宝箱12分奖励（部分补偿）
+                    time_penalty = -15  # 超时基础惩罚
+                    reward = time_penalty + treasure_bonus
                     logger.info(
-                        f"Game truncated! step_no:{step_no} end:{game_info['end_pos']['x']},{game_info['end_pos']['z']} score:{game_info['total_score']},{game_info['treasure_score']}"
+                        f"Game truncated! step_no:{step_no} end:{game_info['end_pos']['x']},{game_info['end_pos']['z']} "
+                        f"score:{game_info['total_score']} treasure:{treasure_score} reward:{reward:.2f}"
                     )
                 elif terminated:
-                    reward = 5 * min(agent.feature_manager.step_no_norm + 0.2, 1)
+                    # 成功到达终点：基础奖励 + 宝箱奖励（主要）+ 步数效率奖励（次要）
+                    # 策略调整：优先收集宝箱（至少4-5个），在max_step步内到达终点即可，不需要尽量少步数
+                    # 基础奖励：成功到达终点的基础奖励，保持适中
+                    base_reward = 25 * min(agent.feature_manager.step_no_norm + 0.2, 1)  # 从35降低到25
+                    
+                    # 宝箱奖励：每个宝箱额外奖励，大幅提高权重，优先收集宝箱
+                    # 收集4个以上宝箱时给予额外奖励
+                    treasure_bonus = treasure_count * 25  # 每个宝箱25分奖励，大幅提高宝箱奖励
+                    if treasure_count >= 4:
+                        treasure_bonus += 50  # 收集4个以上宝箱时额外奖励50分
+                    if treasure_count >= 5:
+                        treasure_bonus += 50  # 收集5个以上宝箱时额外奖励50分（总共100分）
+                    
+                    # 步数效率奖励：步数越少奖励越大，但权重很小，因为不需要尽量少步数
+                    # 只要在max_step步内完成即可，步数效率是次要目标
+                    step_efficiency = max(0, (max_step - step_no) / max_step)
+                    step_bonus = step_efficiency ** 1.5 * 5  # 从25大幅降低到5，步数效率是次要目标
+                    
+                    # 综合奖励：宝箱奖励是主要激励，基础奖励确保到达终点，步数效率奖励很小
+                    reward = base_reward + treasure_bonus + step_bonus
                     logger.info(
-                        f"Game terminated! step_no:{step_no} end:{game_info['end_pos']['x']},{game_info['end_pos']['z']} score:{game_info['total_score']},{game_info['treasure_score']}"
+                        f"Game terminated! step_no:{step_no} end:{game_info['end_pos']['x']},{game_info['end_pos']['z']} "
+                        f"score:{game_info['total_score']} treasure:{treasure_score} (count:{treasure_count}) "
+                        f"reward:{reward:.2f} (base:{base_reward:.2f} treasure:{treasure_bonus:.2f} step:{step_bonus:.2f})"
                     )
                 done = terminated or truncated or (max_step_no > 0 and step >= max_step_no)
 
